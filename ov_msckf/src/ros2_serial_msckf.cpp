@@ -291,8 +291,9 @@ int main(int argc, char **argv) {
   std::set<int> used_index;
   for (int m = 0; m < (int)msgs.size(); m++) {
 
-    // End once we reach the last time, or skip if before beginning time (shouldn't happen)
-    if (!rclcpp::ok() || msgs.at(m).bag_time > time_finish || msgs.at(m).bag_time > max_camera_time)
+    // End once we reach the last time, or once we pass the last camera timestamp if one was observed.
+    if (!rclcpp::ok() || msgs.at(m).bag_time > time_finish ||
+        (max_camera_time >= 0.0 && msgs.at(m).bag_time > max_camera_time))
       break;
     if (msgs.at(m).bag_time < time_init)
       continue;
