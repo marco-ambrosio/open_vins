@@ -34,12 +34,12 @@ launch_args = [
     ),
     DeclareLaunchArgument(
         name="bag_start",
-        default_value="0",
+        default_value="0.0",
         description="bag offset in seconds",
     ),
     DeclareLaunchArgument(
         name="bag_durr",
-        default_value="-1",
+        default_value="-1.0",
         description="bag duration in seconds, <0 plays to the end",
     ),
     DeclareLaunchArgument(
