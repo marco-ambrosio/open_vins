@@ -70,7 +70,7 @@ void open_bag_reader(rosbag2_cpp::Reader &reader, const std::string &bag_path, c
   reader.open(storage_options, converter_options);
 }
 
-double bag_time_to_sec(int64_t time_stamp) { return 1e-9 * static_cast<double>(time_stamp); }
+double bag_time_to_sec(int64_t timestamp) { return 1e-9 * static_cast<double>(timestamp); }
 
 template <typename MessageT> std::shared_ptr<MessageT> deserialize_message(const std::shared_ptr<rosbag2_storage::SerializedBagMessage> &msg) {
   auto out = std::make_shared<MessageT>();
@@ -99,7 +99,7 @@ int main(int argc, char **argv) {
   rclcpp::NodeOptions options;
   options.allow_undeclared_parameters(true);
   options.automatically_declare_parameters_from_overrides(true);
-  auto node = std::make_shared<rclcpp::Node>("ros2_serial_msckf", options);
+  auto node = std::make_shared<rclcpp::Node>("run_serial_msckf", options);
   node->get_parameter<std::string>("config_path", config_path);
 
   // Load the config
@@ -194,7 +194,7 @@ int main(int argc, char **argv) {
     open_bag_reader(bag_info_reader, path_to_bag, bag_storage_id, bag_serialization_format);
     while (bag_info_reader.has_next()) {
       auto msg = bag_info_reader.read_next();
-      double msg_time = bag_time_to_sec(msg->time_stamp);
+      double msg_time = bag_time_to_sec(msg->recv_timestamp);
       if (time_begin < 0) {
         time_begin = msg_time;
       }
@@ -249,7 +249,7 @@ int main(int argc, char **argv) {
 
     while (bag_reader.has_next()) {
       auto msg = bag_reader.read_next();
-      double msg_time = bag_time_to_sec(msg->time_stamp);
+      double msg_time = bag_time_to_sec(msg->recv_timestamp);
       if (msg_time < time_init) {
         continue;
       }
