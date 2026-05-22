@@ -49,6 +49,8 @@ using namespace ov_msckf;
 
 namespace {
 
+constexpr double kCameraSyncToleranceSeconds = 0.02;
+
 struct SerializedBagMessage {
   std::string topic;
   double bag_time = 0.0;
@@ -145,7 +147,7 @@ int main(int argc, char **argv) {
   }
 
   // Location of the ROS bag we want to read in
-  std::string path_to_bag = "/home/patrick/datasets/eth/V1_01_easy";
+  std::string path_to_bag = "";
   node->get_parameter("path_bag", path_to_bag);
   PRINT_DEBUG("[SERIAL]: ros bag path is: %s\n", path_to_bag.c_str());
 
@@ -173,6 +175,12 @@ int main(int argc, char **argv) {
   node->get_parameter("bag_durr", bag_durr);
   PRINT_DEBUG("[SERIAL]: bag start: %.1f\n", bag_start);
   PRINT_DEBUG("[SERIAL]: bag duration: %.1f\n", bag_durr);
+
+  if (path_to_bag.empty()) {
+    PRINT_ERROR(RED "[SERIAL]: path_bag must point to a rosbag2 bag directory.\n" RESET);
+    rclcpp::shutdown();
+    return EXIT_FAILURE;
+  }
 
   //===================================================================================
   //===================================================================================
@@ -222,16 +230,18 @@ int main(int argc, char **argv) {
       topic_types[topic.name] = topic.type;
     }
 
-    if (topic_types.find(topic_imu) != topic_types.end() && topic_types.at(topic_imu) != "sensor_msgs/msg/Imu") {
-      PRINT_ERROR(RED "[SERIAL]: IMU topic has unmatched message types!!\n" RESET);
-      PRINT_ERROR(RED "[SERIAL]: Supports: sensor_msgs/msg/Imu\n" RESET);
+    auto topic_imu_type = topic_types.find(topic_imu);
+    if (topic_imu_type == topic_types.end() || topic_imu_type->second != "sensor_msgs/msg/Imu") {
+      PRINT_ERROR(RED "[SERIAL]: IMU topic is missing or has unmatched message types!!\n" RESET);
+      PRINT_ERROR(RED "[SERIAL]: Supports: sensor_msgs/msg/Imu on %s\n" RESET, topic_imu.c_str());
       rclcpp::shutdown();
       return EXIT_FAILURE;
     }
     for (const auto &topic_camera : topic_cameras) {
-      if (topic_types.find(topic_camera) != topic_types.end() && topic_types.at(topic_camera) != "sensor_msgs/msg/Image") {
-        PRINT_ERROR(RED "[SERIAL]: Image topic has unmatched message types!!\n" RESET);
-        PRINT_ERROR(RED "[SERIAL]: Supports: sensor_msgs/msg/Image\n" RESET);
+      auto topic_camera_type = topic_types.find(topic_camera);
+      if (topic_camera_type == topic_types.end() || topic_camera_type->second != "sensor_msgs/msg/Image") {
+        PRINT_ERROR(RED "[SERIAL]: Image topic is missing or has unmatched message types!!\n" RESET);
+        PRINT_ERROR(RED "[SERIAL]: Supports: sensor_msgs/msg/Image on %s\n" RESET, topic_camera.c_str());
         rclcpp::shutdown();
         return EXIT_FAILURE;
       }
@@ -319,7 +329,7 @@ int main(int argc, char **argv) {
         for (int mt = m; mt < (int)msgs.size(); mt++) {
           if (msgs.at(mt).topic != topic_cameras.at(cam_idt))
             continue;
-          if (std::abs(msgs.at(mt).bag_time - meas_time) < 0.02)
+          if (std::abs(msgs.at(mt).bag_time - meas_time) < kCameraSyncToleranceSeconds)
             cam_idt_idx = mt;
           break;
         }
