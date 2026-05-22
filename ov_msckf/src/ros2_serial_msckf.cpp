@@ -232,7 +232,7 @@ int main(int argc, char **argv) {
 
     auto topic_imu_type = topic_types.find(topic_imu);
     if (topic_imu_type == topic_types.end() || topic_imu_type->second != "sensor_msgs/msg/Imu") {
-      PRINT_ERROR(RED "[SERIAL]: IMU topic is missing or has unmatched message types!!\n" RESET);
+      PRINT_ERROR(RED "[SERIAL]: IMU topic is missing or has mismatched message types!!\n" RESET);
       PRINT_ERROR(RED "[SERIAL]: Supports: sensor_msgs/msg/Imu on %s\n" RESET, topic_imu.c_str());
       rclcpp::shutdown();
       return EXIT_FAILURE;
@@ -240,7 +240,7 @@ int main(int argc, char **argv) {
     for (const auto &topic_camera : topic_cameras) {
       auto topic_camera_type = topic_types.find(topic_camera);
       if (topic_camera_type == topic_types.end() || topic_camera_type->second != "sensor_msgs/msg/Image") {
-        PRINT_ERROR(RED "[SERIAL]: Image topic is missing or has unmatched message types!!\n" RESET);
+        PRINT_ERROR(RED "[SERIAL]: Image topic is missing or has mismatched message types!!\n" RESET);
         PRINT_ERROR(RED "[SERIAL]: Supports: sensor_msgs/msg/Image on %s\n" RESET, topic_camera.c_str());
         rclcpp::shutdown();
         return EXIT_FAILURE;
@@ -316,7 +316,7 @@ int main(int argc, char **argv) {
         continue;
 
       // We have a matching camera topic here, now find the other cameras for this time
-      // For each camera, we will find the nearest timestamp (within 0.02sec) that is greater than the current
+      // For each camera, we will find the nearest timestamp within our sync tolerance window
       // If we are unable, then this message should just be skipped since it isn't a sync'ed pair!
       std::map<int, int> camid_to_msg_index;
       double meas_time = msgs.at(m).bag_time;
