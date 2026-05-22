@@ -3,6 +3,8 @@ cmake_minimum_required(VERSION 3.3)
 # Find ROS build system
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(rosbag2_cpp REQUIRED)
+find_package(rosbag2_storage REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
@@ -37,6 +39,8 @@ list(APPEND thirdparty_libraries
 )
 list(APPEND ament_libraries
         rclcpp
+        rosbag2_cpp
+        rosbag2_storage
         tf2_ros
         tf2_geometry_msgs
         std_msgs
@@ -92,6 +96,11 @@ add_executable(run_subscribe_msckf src/run_subscribe_msckf.cpp)
 ament_target_dependencies(run_subscribe_msckf ${ament_libraries})
 target_link_libraries(run_subscribe_msckf ov_msckf_lib ${thirdparty_libraries})
 install(TARGETS run_subscribe_msckf DESTINATION lib/${PROJECT_NAME})
+
+add_executable(ros2_serial_msckf src/ros2_serial_msckf.cpp)
+ament_target_dependencies(ros2_serial_msckf ${ament_libraries})
+target_link_libraries(ros2_serial_msckf ov_msckf_lib ${thirdparty_libraries})
+install(TARGETS ros2_serial_msckf DESTINATION lib/${PROJECT_NAME})
 
 add_executable(run_simulation src/run_simulation.cpp)
 ament_target_dependencies(run_simulation ${ament_libraries})
