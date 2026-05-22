@@ -1,5 +1,6 @@
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, LogInfo, OpaqueFunction
+from launch.actions import DeclareLaunchArgument, GroupAction, LogInfo, OpaqueFunction
+from launch.conditions import IfCondition
 from launch.substitutions import EnvironmentVariable, LaunchConfiguration
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
@@ -68,6 +69,16 @@ launch_args = [
         description="rosbag2 serialization format",
     ),
     DeclareLaunchArgument(
+        name="dosave",
+        default_value="false",
+        description="save estimated trajectory to file (requires ov_eval pose_to_file node)",
+    ),
+    DeclareLaunchArgument(
+        name="path_est",
+        default_value="/tmp/traj_estimate.txt",
+        description="output path for estimated trajectory",
+    ),
+    DeclareLaunchArgument(
         name="dotime",
         default_value="false",
         description="record timing information",
@@ -76,6 +87,11 @@ launch_args = [
         name="path_time",
         default_value="/tmp/traj_timing.txt",
         description="timing statistics output path",
+    ),
+    DeclareLaunchArgument(
+        name="dolivetraj",
+        default_value="false",
+        description="visualize live aligned GT trajectory (requires ov_eval live_align_trajectory node)",
     ),
     DeclareLaunchArgument(
         name="path_gt",
@@ -125,11 +141,13 @@ def launch_setup(context):
             ]
         bag_path = os.path.join(dataset_root, config, dataset)
 
+    namespace = LaunchConfiguration("namespace")
+
     return [
         Node(
             package="ov_msckf",
             executable="run_serial_msckf",
-            namespace=LaunchConfiguration("namespace"),
+            namespace=namespace,
             output="screen",
             parameters=[
                 {"verbosity": LaunchConfiguration("verbosity")},
@@ -145,7 +163,40 @@ def launch_setup(context):
                 {"record_timing_filepath": LaunchConfiguration("path_time")},
                 {"path_gt": LaunchConfiguration("path_gt")},
             ],
-        )
+        ),
+        # Record estimated trajectory to file (requires ov_eval to be built for ROS2)
+        GroupAction(
+            condition=IfCondition(LaunchConfiguration("dosave")),
+            actions=[
+                Node(
+                    package="ov_eval",
+                    executable="pose_to_file",
+                    name="recorder_estimate",
+                    output="screen",
+                    parameters=[
+                        {"topic": ["/", namespace, "/poseimu"]},
+                        {"topic_type": "PoseWithCovarianceStamped"},
+                        {"output": LaunchConfiguration("path_est")},
+                    ],
+                ),
+            ],
+        ),
+        # Live groundtruth alignment visualization (requires ov_eval to be built for ROS2)
+        GroupAction(
+            condition=IfCondition(LaunchConfiguration("dolivetraj")),
+            actions=[
+                Node(
+                    package="ov_eval",
+                    executable="live_align_trajectory",
+                    name="live_align_trajectory",
+                    output="log",
+                    parameters=[
+                        {"alignment_type": "posyaw"},
+                        {"path_gt": LaunchConfiguration("path_gt")},
+                    ],
+                ),
+            ],
+        ),
     ]
 
 
