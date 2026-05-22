@@ -142,6 +142,7 @@ def launch_setup(context):
         bag_path = os.path.join(dataset_root, config, dataset)
 
     namespace = LaunchConfiguration("namespace")
+    namespace_str = namespace.perform(context)
 
     return [
         Node(
@@ -174,7 +175,7 @@ def launch_setup(context):
                     name="recorder_estimate",
                     output="screen",
                     parameters=[
-                        {"topic": ["/", namespace, "/poseimu"]},
+                        {"topic": f"/{namespace_str}/poseimu"},
                         {"topic_type": "PoseWithCovarianceStamped"},
                         {"output": LaunchConfiguration("path_est")},
                     ],
