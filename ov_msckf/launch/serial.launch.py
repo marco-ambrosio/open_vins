@@ -1,6 +1,6 @@
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, LogInfo, OpaqueFunction
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import EnvironmentVariable, LaunchConfiguration
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 import os
@@ -46,6 +46,11 @@ launch_args = [
         name="dataset",
         default_value="dataset-room1_512_16",
         description="dataset name used to derive default bag and groundtruth paths",
+    ),
+    DeclareLaunchArgument(
+        name="dataset_root",
+        default_value=EnvironmentVariable("OPENVINS_DATASET_DIR", default_value=""),
+        description="root directory containing rosbag2 datasets used to derive the default bag path",
     ),
     DeclareLaunchArgument(
         name="bag",
@@ -109,9 +114,16 @@ def launch_setup(context):
 
     bag_path = LaunchConfiguration("bag").perform(context)
     if not bag_path:
+        dataset_root = LaunchConfiguration("dataset_root").perform(context)
         config = LaunchConfiguration("config").perform(context)
         dataset = LaunchConfiguration("dataset").perform(context)
-        bag_path = os.path.join("/home/patrick/datasets", config, dataset)
+        if not dataset_root:
+            return [
+                LogInfo(
+                    msg="ERROR: bag was not provided and dataset_root/OPENVINS_DATASET_DIR is unset - not starting OpenVINS"
+                )
+            ]
+        bag_path = os.path.join(dataset_root, config, dataset)
 
     return [
         Node(
