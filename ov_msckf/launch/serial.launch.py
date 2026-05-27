@@ -24,16 +24,6 @@ launch_args = [
         description="ALL, DEBUG, INFO, WARNING, ERROR, SILENT",
     ),
     DeclareLaunchArgument(
-        name="max_cameras",
-        default_value="2",
-        description="how many cameras we have; serial runner supports only 1 = mono or 2 = stereo",
-    ),
-    DeclareLaunchArgument(
-        name="use_stereo",
-        default_value="true",
-        description="if we should track stereo constraints between synchronized pairs",
-    ),
-    DeclareLaunchArgument(
         name="bag_start",
         default_value="0.0",
         description="bag offset in seconds",
@@ -153,8 +143,6 @@ def launch_setup(context):
             parameters=[
                 {"verbosity": LaunchConfiguration("verbosity")},
                 {"config_path": config_path},
-                {"use_stereo": LaunchConfiguration("use_stereo")},
-                {"max_cameras": LaunchConfiguration("max_cameras")},
                 {"path_bag": bag_path},
                 {"bag_start": LaunchConfiguration("bag_start")},
                 {"bag_durr": LaunchConfiguration("bag_durr")},
