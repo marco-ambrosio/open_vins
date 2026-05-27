@@ -26,19 +26,27 @@
 #include <rosbag2_cpp/reader.hpp>
 #include <rosbag2_storage/serialized_bag_message.hpp>
 #include <rosbag2_storage/storage_options.hpp>
+#include <sensor_msgs/image_encodings.hpp>
+#include <sensor_msgs/msg/compressed_image.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 
 #include <algorithm>
 #include <cmath>
+#include <cctype>
 #include <cstdlib>
 #include <cstdint>
+#include <fstream>
 #include <map>
 #include <memory>
+#include <opencv2/imgcodecs.hpp>
+#include <opencv2/imgproc.hpp>
 #include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+#include <cv_bridge/cv_bridge.hpp>
 
 #include "core/VioManager.h"
 #include "core/VioManagerOptions.h"
@@ -53,19 +61,73 @@ constexpr double kCameraSyncToleranceSeconds = 0.02;
 
 struct SerializedBagMessage {
   std::string topic;
+  std::string topic_type;
   double bag_time = 0.0;
   std::shared_ptr<rosbag2_storage::SerializedBagMessage> serialized;
 };
+
+std::string trim(const std::string &input) {
+  const auto begin = input.find_first_not_of(" \t\n\r");
+  if (begin == std::string::npos) {
+    return "";
+  }
+  const auto end = input.find_last_not_of(" \t\n\r");
+  return input.substr(begin, end - begin + 1);
+}
+
+std::string parse_metadata_value(const std::string &line, const std::string &key) {
+  const auto pos = line.find(key);
+  if (pos == std::string::npos) {
+    return "";
+  }
+  const auto colon = line.find(':', pos + key.size());
+  if (colon == std::string::npos) {
+    return "";
+  }
+  return trim(line.substr(colon + 1));
+}
+
+bool detect_rosbag2_layout(const std::string &bag_path, std::string &bag_storage_id, std::string &bag_serialization_format) {
+  std::ifstream metadata_file(bag_path + "/metadata.yaml");
+  if (!metadata_file.is_open()) {
+    return false;
+  }
+
+  std::string line;
+  while (std::getline(metadata_file, line)) {
+    if (bag_storage_id.empty()) {
+      auto storage = parse_metadata_value(line, "storage_identifier");
+      if (!storage.empty()) {
+        bag_storage_id = storage;
+      }
+    }
+    if (bag_serialization_format.empty()) {
+      auto format = parse_metadata_value(line, "serialization_format");
+      if (!format.empty()) {
+        bag_serialization_format = format;
+      }
+    }
+    if (!bag_storage_id.empty() && !bag_serialization_format.empty()) {
+      return true;
+    }
+  }
+
+  return !bag_storage_id.empty() || !bag_serialization_format.empty();
+}
 
 void open_bag_reader(rosbag2_cpp::Reader &reader, const std::string &bag_path, const std::string &bag_storage_id,
                      const std::string &bag_serialization_format) {
   rosbag2_storage::StorageOptions storage_options;
   storage_options.uri = bag_path;
-  storage_options.storage_id = bag_storage_id;
+  if (!bag_storage_id.empty()) {
+    storage_options.storage_id = bag_storage_id;
+  }
 
   rosbag2_cpp::ConverterOptions converter_options;
-  converter_options.input_serialization_format = bag_serialization_format;
-  converter_options.output_serialization_format = bag_serialization_format;
+  if (!bag_serialization_format.empty()) {
+    converter_options.input_serialization_format = bag_serialization_format;
+    converter_options.output_serialization_format = bag_serialization_format;
+  }
 
   reader.open(storage_options, converter_options);
 }
@@ -78,6 +140,54 @@ template <typename MessageT> std::shared_ptr<MessageT> deserialize_message(const
   rclcpp::SerializedMessage serialized_msg(*msg->serialized_data);
   serialization.deserialize_message(&serialized_msg, out.get());
   return out;
+}
+
+bool compressed_to_mono8(const sensor_msgs::msg::CompressedImage &msg, cv::Mat &image) {
+  std::string format = msg.format;
+  std::transform(format.begin(), format.end(), format.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  if (format.find("compresseddepth") != std::string::npos) {
+    PRINT_ERROR(RED "[SERIAL]: Unsupported compressed transport '%s'. Depth compression is not supported.\n" RESET, msg.format.c_str());
+    return false;
+  }
+
+  cv::Mat decoded = cv::imdecode(msg.data, cv::IMREAD_UNCHANGED);
+  if (decoded.empty()) {
+    PRINT_ERROR(RED "[SERIAL]: Unable to decode compressed image payload (format='%s').\n" RESET, msg.format.c_str());
+    return false;
+  }
+  if (decoded.type() == CV_8UC1) {
+    image = decoded;
+    return true;
+  }
+  if (decoded.type() == CV_8UC3) {
+    cv::cvtColor(decoded, image, cv::COLOR_BGR2GRAY);
+    return true;
+  }
+  if (decoded.type() == CV_8UC4) {
+    cv::cvtColor(decoded, image, cv::COLOR_BGRA2GRAY);
+    return true;
+  }
+
+  PRINT_ERROR(RED "[SERIAL]: Unsupported compressed image format '%s' with OpenCV type %d.\n" RESET, msg.format.c_str(), decoded.type());
+  return false;
+}
+
+sensor_msgs::msg::Image::SharedPtr deserialize_camera_message(const SerializedBagMessage &message) {
+  if (message.topic_type == "sensor_msgs/msg/Image") {
+    return deserialize_message<sensor_msgs::msg::Image>(message.serialized);
+  }
+  if (message.topic_type == "sensor_msgs/msg/CompressedImage") {
+    auto compressed = deserialize_message<sensor_msgs::msg::CompressedImage>(message.serialized);
+    cv::Mat mono_image;
+    if (!compressed_to_mono8(*compressed, mono_image)) {
+      return nullptr;
+    }
+    cv_bridge::CvImage cv_image(compressed->header, sensor_msgs::image_encodings::MONO8, mono_image);
+    return cv_image.toImageMsg();
+  }
+
+  PRINT_ERROR(RED "[SERIAL]: Unsupported camera topic type '%s'.\n" RESET, message.topic_type.c_str());
+  return nullptr;
 }
 
 } // namespace
@@ -152,9 +262,9 @@ int main(int argc, char **argv) {
   PRINT_DEBUG("[SERIAL]: ros bag path is: %s\n", path_to_bag.c_str());
 
   // rosbag2 requires a storage backend and serialization format.
-  // We default to the standard sqlite3/cdr layout, but these can be overridden for other rosbag2 setups.
-  std::string bag_storage_id = "sqlite3";
-  std::string bag_serialization_format = "cdr";
+  // We first try to detect these from bag metadata and fallback to sqlite3/cdr if detection is unavailable.
+  std::string bag_storage_id = "";
+  std::string bag_serialization_format = "";
   node->get_parameter("bag_storage_id", bag_storage_id);
   node->get_parameter("bag_serialization_format", bag_serialization_format);
 
@@ -180,6 +290,33 @@ int main(int argc, char **argv) {
     PRINT_ERROR(RED "[SERIAL]: path_bag must point to a rosbag2 bag directory.\n" RESET);
     rclcpp::shutdown();
     return EXIT_FAILURE;
+  }
+
+  const bool storage_manually_set = !bag_storage_id.empty();
+  const bool serialization_manually_set = !bag_serialization_format.empty();
+  std::string detected_storage_id = bag_storage_id;
+  std::string detected_serialization_format = bag_serialization_format;
+  const bool detected_layout = detect_rosbag2_layout(path_to_bag, detected_storage_id, detected_serialization_format);
+  if (detected_layout && (!storage_manually_set || !serialization_manually_set)) {
+    if (!storage_manually_set) {
+      bag_storage_id = detected_storage_id;
+    }
+    if (!serialization_manually_set) {
+      bag_serialization_format = detected_serialization_format;
+    }
+    PRINT_INFO("[SERIAL]: autodetected rosbag2 layout storage='%s' serialization='%s'\n",
+               bag_storage_id.empty() ? "<auto>" : bag_storage_id.c_str(),
+               bag_serialization_format.empty() ? "<auto>" : bag_serialization_format.c_str());
+  }
+  if (bag_storage_id.empty()) {
+    bag_storage_id = "sqlite3";
+  }
+  if (bag_serialization_format.empty()) {
+    bag_serialization_format = "cdr";
+  }
+  if (!detected_layout && (!storage_manually_set || !serialization_manually_set)) {
+    PRINT_WARNING(YELLOW "[SERIAL]: Unable to autodetect rosbag2 layout from metadata, falling back to storage='%s' serialization='%s'.\n" RESET,
+                  bag_storage_id.c_str(), bag_serialization_format.c_str());
   }
 
   //===================================================================================
@@ -239,9 +376,10 @@ int main(int argc, char **argv) {
     }
     for (const auto &topic_camera : topic_cameras) {
       auto topic_camera_type = topic_types.find(topic_camera);
-      if (topic_camera_type == topic_types.end() || topic_camera_type->second != "sensor_msgs/msg/Image") {
+      if (topic_camera_type == topic_types.end() ||
+          (topic_camera_type->second != "sensor_msgs/msg/Image" && topic_camera_type->second != "sensor_msgs/msg/CompressedImage")) {
         PRINT_ERROR(RED "[SERIAL]: Image topic is missing or has mismatched message types!!\n" RESET);
-        PRINT_ERROR(RED "[SERIAL]: Supports: sensor_msgs/msg/Image on %s\n" RESET, topic_camera.c_str());
+        PRINT_ERROR(RED "[SERIAL]: Supports: sensor_msgs/msg/Image and sensor_msgs/msg/CompressedImage on %s\n" RESET, topic_camera.c_str());
         rclcpp::shutdown();
         return EXIT_FAILURE;
       }
@@ -257,12 +395,12 @@ int main(int argc, char **argv) {
         break;
       }
       if (msg->topic_name == topic_imu) {
-        msgs.push_back({msg->topic_name, msg_time, msg});
+        msgs.push_back({msg->topic_name, topic_types[msg->topic_name], msg_time, msg});
         continue;
       }
       for (int i = 0; i < params.state_options.num_cameras; i++) {
         if (msg->topic_name == topic_cameras.at(i)) {
-          msgs.push_back({msg->topic_name, msg_time, msg});
+          msgs.push_back({msg->topic_name, topic_types[msg->topic_name], msg_time, msg});
           max_camera_time = std::max(max_camera_time, msg_time);
           break;
         }
@@ -356,10 +494,19 @@ int main(int argc, char **argv) {
 
       // Pass our data into our visualizer callbacks!
       if (params.state_options.num_cameras == 1) {
-        viz->callback_monocular(deserialize_message<sensor_msgs::msg::Image>(msgs.at(camid_to_msg_index.at(0)).serialized), 0);
+        auto msg0 = deserialize_camera_message(msgs.at(camid_to_msg_index.at(0)));
+        if (msg0 == nullptr) {
+          rclcpp::shutdown();
+          return EXIT_FAILURE;
+        }
+        viz->callback_monocular(msg0, 0);
       } else if (params.state_options.num_cameras == 2) {
-        auto msg0 = deserialize_message<sensor_msgs::msg::Image>(msgs.at(camid_to_msg_index.at(0)).serialized);
-        auto msg1 = deserialize_message<sensor_msgs::msg::Image>(msgs.at(camid_to_msg_index.at(1)).serialized);
+        auto msg0 = deserialize_camera_message(msgs.at(camid_to_msg_index.at(0)));
+        auto msg1 = deserialize_camera_message(msgs.at(camid_to_msg_index.at(1)));
+        if (msg0 == nullptr || msg1 == nullptr) {
+          rclcpp::shutdown();
+          return EXIT_FAILURE;
+        }
         used_index.insert(camid_to_msg_index.at(0)); // skip this message
         used_index.insert(camid_to_msg_index.at(1)); // skip this message
         viz->callback_stereo(msg0, msg1, 0, 1);
