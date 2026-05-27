@@ -45,7 +45,7 @@ namespace {
 enum class CameraTopicType { RawImage, CompressedImage };
 
 std::string to_lower(std::string value) {
-  std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return std::tolower(c); });
   return value;
 }
 
@@ -274,26 +274,26 @@ void ROS2Visualizer::setup_subscribers(std::shared_ptr<ov_core::YamlParser> pars
 
     // Create sync filter (they have unique pointers internally, so we have to use move logic here...)
     if (cam0_type == CameraTopicType::CompressedImage) {
+      auto stereo_cb = static_cast<void (ROS2Visualizer::*)(const sensor_msgs::msg::CompressedImage::ConstSharedPtr,
+                                                            const sensor_msgs::msg::CompressedImage::ConstSharedPtr, int, int)>(
+          &ROS2Visualizer::callback_stereo);
       auto image_sub0 = std::make_shared<message_filters::Subscriber<sensor_msgs::msg::CompressedImage>>(_node, cam_topic0);
       auto image_sub1 = std::make_shared<message_filters::Subscriber<sensor_msgs::msg::CompressedImage>>(_node, cam_topic1);
       auto sync = std::make_shared<message_filters::Synchronizer<sync_pol_compressed>>(sync_pol_compressed(10), *image_sub0, *image_sub1);
-      sync->registerCallback(std::bind(static_cast<void (ROS2Visualizer::*)(const sensor_msgs::msg::CompressedImage::ConstSharedPtr,
-                                                                            const sensor_msgs::msg::CompressedImage::ConstSharedPtr, int,
-                                                                            int)>(&ROS2Visualizer::callback_stereo),
-                                       this, std::placeholders::_1, std::placeholders::_2, 0, 1));
+      sync->registerCallback(std::bind(stereo_cb, this, std::placeholders::_1, std::placeholders::_2, 0, 1));
       sync_cam_compressed.push_back(sync);
       sync_subs_cam_compressed.push_back(image_sub0);
       sync_subs_cam_compressed.push_back(image_sub1);
       PRINT_INFO("subscribing to cam (stereo compressed): %s\n", cam_topic0.c_str());
       PRINT_INFO("subscribing to cam (stereo compressed): %s\n", cam_topic1.c_str());
     } else {
+      auto stereo_cb = static_cast<void (ROS2Visualizer::*)(const sensor_msgs::msg::Image::ConstSharedPtr,
+                                                            const sensor_msgs::msg::Image::ConstSharedPtr, int, int)>(
+          &ROS2Visualizer::callback_stereo);
       auto image_sub0 = std::make_shared<message_filters::Subscriber<sensor_msgs::msg::Image>>(_node, cam_topic0);
       auto image_sub1 = std::make_shared<message_filters::Subscriber<sensor_msgs::msg::Image>>(_node, cam_topic1);
       auto sync = std::make_shared<message_filters::Synchronizer<sync_pol>>(sync_pol(10), *image_sub0, *image_sub1);
-      sync->registerCallback(std::bind(static_cast<void (ROS2Visualizer::*)(const sensor_msgs::msg::Image::ConstSharedPtr,
-                                                                            const sensor_msgs::msg::Image::ConstSharedPtr, int, int)>(
-                                           &ROS2Visualizer::callback_stereo),
-                                       this, std::placeholders::_1, std::placeholders::_2, 0, 1));
+      sync->registerCallback(std::bind(stereo_cb, this, std::placeholders::_1, std::placeholders::_2, 0, 1));
       sync_cam.push_back(sync);
       sync_subs_cam.push_back(image_sub0);
       sync_subs_cam.push_back(image_sub1);

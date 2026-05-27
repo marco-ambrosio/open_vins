@@ -58,6 +58,8 @@ using namespace ov_msckf;
 namespace {
 
 constexpr double kCameraSyncToleranceSeconds = 0.02;
+constexpr const char *kDefaultBagStorageId = "sqlite3";
+constexpr const char *kDefaultBagSerializationFormat = "cdr";
 
 struct SerializedBagMessage {
   std::string topic;
@@ -76,15 +78,21 @@ std::string trim(const std::string &input) {
 }
 
 std::string parse_metadata_value(const std::string &line, const std::string &key) {
-  const auto pos = line.find(key);
-  if (pos == std::string::npos) {
+  std::string cleaned = trim(line);
+  if (cleaned.rfind("- ", 0) == 0) {
+    cleaned = trim(cleaned.substr(2));
+  }
+  if (cleaned.rfind(key, 0) != 0) {
     return "";
   }
-  const auto colon = line.find(':', pos + key.size());
-  if (colon == std::string::npos) {
+  size_t separator = key.size();
+  while (separator < cleaned.size() && (cleaned.at(separator) == ' ' || cleaned.at(separator) == '\t')) {
+    separator++;
+  }
+  if (separator >= cleaned.size() || cleaned.at(separator) != ':') {
     return "";
   }
-  return trim(line.substr(colon + 1));
+  return trim(cleaned.substr(separator + 1));
 }
 
 bool detect_rosbag2_layout(const std::string &bag_path, std::string &bag_storage_id, std::string &bag_serialization_format) {
@@ -144,7 +152,7 @@ template <typename MessageT> std::shared_ptr<MessageT> deserialize_message(const
 
 bool compressed_to_mono8(const sensor_msgs::msg::CompressedImage &msg, cv::Mat &image) {
   std::string format = msg.format;
-  std::transform(format.begin(), format.end(), format.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  std::transform(format.begin(), format.end(), format.begin(), [](unsigned char c) { return std::tolower(c); });
   if (format.find("compresseddepth") != std::string::npos) {
     PRINT_ERROR(RED "[SERIAL]: Unsupported compressed transport '%s'. Depth compression is not supported.\n" RESET, msg.format.c_str());
     return false;
@@ -304,15 +312,14 @@ int main(int argc, char **argv) {
     if (!serialization_manually_set) {
       bag_serialization_format = detected_serialization_format;
     }
-    PRINT_INFO("[SERIAL]: autodetected rosbag2 layout storage='%s' serialization='%s'\n",
-               bag_storage_id.empty() ? "<auto>" : bag_storage_id.c_str(),
-               bag_serialization_format.empty() ? "<auto>" : bag_serialization_format.c_str());
+    PRINT_INFO("[SERIAL]: autodetected rosbag2 layout storage='%s' serialization='%s'\n", bag_storage_id.c_str(),
+               bag_serialization_format.c_str());
   }
   if (bag_storage_id.empty()) {
-    bag_storage_id = "sqlite3";
+    bag_storage_id = kDefaultBagStorageId;
   }
   if (bag_serialization_format.empty()) {
-    bag_serialization_format = "cdr";
+    bag_serialization_format = kDefaultBagSerializationFormat;
   }
   if (!detected_layout && (!storage_manually_set || !serialization_manually_set)) {
     PRINT_WARNING(YELLOW "[SERIAL]: Unable to autodetect rosbag2 layout from metadata, falling back to storage='%s' serialization='%s'.\n" RESET,
