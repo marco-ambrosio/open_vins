@@ -31,9 +31,88 @@
 #include "utils/print.h"
 #include "utils/sensor_data.h"
 
+#include <algorithm>
+#include <cctype>
+#include <opencv2/imgcodecs.hpp>
+#include <opencv2/imgproc.hpp>
+
 using namespace ov_core;
 using namespace ov_type;
 using namespace ov_msckf;
+
+namespace {
+
+enum class CameraTopicType { RawImage, CompressedImage };
+
+std::string to_lower(std::string value) {
+  std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return std::tolower(c); });
+  return value;
+}
+
+CameraTopicType detect_camera_topic_type(const std::shared_ptr<rclcpp::Node> &node, const std::string &topic) {
+  const auto topics = node->get_topic_names_and_types();
+  auto topic_it = topics.find(topic);
+  if (topic_it == topics.end()) {
+    PRINT_WARNING(YELLOW "Unable to determine topic type for %s, defaulting to sensor_msgs/msg/Image.\n" RESET, topic.c_str());
+    return CameraTopicType::RawImage;
+  }
+
+  bool has_raw = false;
+  bool has_compressed = false;
+  for (const auto &type : topic_it->second) {
+    has_raw = has_raw || (type == "sensor_msgs/msg/Image");
+    has_compressed = has_compressed || (type == "sensor_msgs/msg/CompressedImage");
+  }
+
+  if (has_raw && has_compressed) {
+    PRINT_WARNING(YELLOW "Topic %s publishes both raw and compressed image types. Defaulting to raw images.\n" RESET, topic.c_str());
+    return CameraTopicType::RawImage;
+  }
+  if (has_compressed) {
+    return CameraTopicType::CompressedImage;
+  }
+  if (has_raw) {
+    return CameraTopicType::RawImage;
+  }
+
+  PRINT_WARNING(YELLOW "Topic %s is not image-compatible (found type %s). Defaulting to sensor_msgs/msg/Image.\n" RESET, topic.c_str(),
+                topic_it->second.empty() ? "<none>" : topic_it->second.front().c_str());
+  return CameraTopicType::RawImage;
+}
+
+bool compressed_to_mono8(const sensor_msgs::msg::CompressedImage &msg, cv::Mat &image) {
+  std::string format = to_lower(msg.format);
+  if (format.find("compresseddepth") != std::string::npos) {
+    PRINT_ERROR(RED "Unsupported compressed transport '%s'. Depth compression is not supported.\n" RESET, msg.format.c_str());
+    return false;
+  }
+
+  cv::Mat decoded = cv::imdecode(msg.data, cv::IMREAD_UNCHANGED);
+  if (decoded.empty()) {
+    PRINT_ERROR(RED "Unable to decode compressed image payload (format='%s').\n" RESET, msg.format.c_str());
+    return false;
+  }
+
+  if (decoded.type() == CV_8UC1) {
+    image = decoded;
+    return true;
+  }
+
+  if (decoded.type() == CV_8UC3) {
+    cv::cvtColor(decoded, image, cv::COLOR_BGR2GRAY);
+    return true;
+  }
+
+  if (decoded.type() == CV_8UC4) {
+    cv::cvtColor(decoded, image, cv::COLOR_BGRA2GRAY);
+    return true;
+  }
+
+  PRINT_ERROR(RED "Unsupported compressed image format '%s' with OpenCV type %d.\n" RESET, msg.format.c_str(), decoded.type());
+  return false;
+}
+
+} // namespace
 
 ROS2Visualizer::ROS2Visualizer(std::shared_ptr<rclcpp::Node> node, std::shared_ptr<VioManager> app, std::shared_ptr<Simulator> sim)
     : _node(node), _app(app), _sim(sim), thread_update_running(false) {
@@ -185,20 +264,42 @@ void ROS2Visualizer::setup_subscribers(std::shared_ptr<ov_core::YamlParser> pars
     _node->get_parameter("topic_camera" + std::to_string(1), cam_topic1);
     parser->parse_external("relative_config_imucam", "cam" + std::to_string(0), "rostopic", cam_topic0);
     parser->parse_external("relative_config_imucam", "cam" + std::to_string(1), "rostopic", cam_topic1);
+    CameraTopicType cam0_type = detect_camera_topic_type(_node, cam_topic0);
+    CameraTopicType cam1_type = detect_camera_topic_type(_node, cam_topic1);
+    if (cam0_type != cam1_type) {
+      PRINT_ERROR(RED "Stereo topics must publish matching message types. %s and %s are mismatched.\n" RESET, cam_topic0.c_str(),
+                  cam_topic1.c_str());
+      std::exit(EXIT_FAILURE);
+    }
+
     // Create sync filter (they have unique pointers internally, so we have to use move logic here...)
-    auto image_sub0 = std::make_shared<message_filters::Subscriber<sensor_msgs::msg::Image>>(_node, cam_topic0);
-    auto image_sub1 = std::make_shared<message_filters::Subscriber<sensor_msgs::msg::Image>>(_node, cam_topic1);
-    auto sync = std::make_shared<message_filters::Synchronizer<sync_pol>>(sync_pol(10), *image_sub0, *image_sub1);
-    sync->registerCallback(std::bind(&ROS2Visualizer::callback_stereo, this, std::placeholders::_1, std::placeholders::_2, 0, 1));
-    // sync->registerCallback([](const sensor_msgs::msg::Image::SharedPtr msg0, const sensor_msgs::msg::Image::SharedPtr msg1)
-    // {callback_stereo(msg0, msg1, 0, 1);});
-    // sync->registerCallback(&callback_stereo2); // since the above two alternatives fail to compile for some reason
-    // Append to our vector of subscribers
-    sync_cam.push_back(sync);
-    sync_subs_cam.push_back(image_sub0);
-    sync_subs_cam.push_back(image_sub1);
-    PRINT_INFO("subscribing to cam (stereo): %s\n", cam_topic0.c_str());
-    PRINT_INFO("subscribing to cam (stereo): %s\n", cam_topic1.c_str());
+    if (cam0_type == CameraTopicType::CompressedImage) {
+      auto stereo_cb = static_cast<void (ROS2Visualizer::*)(const sensor_msgs::msg::CompressedImage::ConstSharedPtr,
+                                                            const sensor_msgs::msg::CompressedImage::ConstSharedPtr, int, int)>(
+          &ROS2Visualizer::callback_stereo);
+      auto image_sub0 = std::make_shared<message_filters::Subscriber<sensor_msgs::msg::CompressedImage>>(_node, cam_topic0);
+      auto image_sub1 = std::make_shared<message_filters::Subscriber<sensor_msgs::msg::CompressedImage>>(_node, cam_topic1);
+      auto sync = std::make_shared<message_filters::Synchronizer<sync_pol_compressed>>(sync_pol_compressed(10), *image_sub0, *image_sub1);
+      sync->registerCallback(std::bind(stereo_cb, this, std::placeholders::_1, std::placeholders::_2, 0, 1));
+      sync_cam_compressed.push_back(sync);
+      sync_subs_cam_compressed.push_back(image_sub0);
+      sync_subs_cam_compressed.push_back(image_sub1);
+      PRINT_INFO("subscribing to cam (stereo compressed): %s\n", cam_topic0.c_str());
+      PRINT_INFO("subscribing to cam (stereo compressed): %s\n", cam_topic1.c_str());
+    } else {
+      auto stereo_cb = static_cast<void (ROS2Visualizer::*)(const sensor_msgs::msg::Image::ConstSharedPtr,
+                                                            const sensor_msgs::msg::Image::ConstSharedPtr, int, int)>(
+          &ROS2Visualizer::callback_stereo);
+      auto image_sub0 = std::make_shared<message_filters::Subscriber<sensor_msgs::msg::Image>>(_node, cam_topic0);
+      auto image_sub1 = std::make_shared<message_filters::Subscriber<sensor_msgs::msg::Image>>(_node, cam_topic1);
+      auto sync = std::make_shared<message_filters::Synchronizer<sync_pol>>(sync_pol(10), *image_sub0, *image_sub1);
+      sync->registerCallback(std::bind(stereo_cb, this, std::placeholders::_1, std::placeholders::_2, 0, 1));
+      sync_cam.push_back(sync);
+      sync_subs_cam.push_back(image_sub0);
+      sync_subs_cam.push_back(image_sub1);
+      PRINT_INFO("subscribing to cam (stereo): %s\n", cam_topic0.c_str());
+      PRINT_INFO("subscribing to cam (stereo): %s\n", cam_topic1.c_str());
+    }
   } else {
     // Now we should add any non-stereo callbacks here
     for (int i = 0; i < _app->get_params().state_options.num_cameras; i++) {
@@ -207,13 +308,20 @@ void ROS2Visualizer::setup_subscribers(std::shared_ptr<ov_core::YamlParser> pars
       _node->declare_parameter<std::string>("topic_camera" + std::to_string(i), "/cam" + std::to_string(i) + "/image_raw");
       _node->get_parameter("topic_camera" + std::to_string(i), cam_topic);
       parser->parse_external("relative_config_imucam", "cam" + std::to_string(i), "rostopic", cam_topic);
-      // create subscriber
-      // auto sub = _node->create_subscription<sensor_msgs::msg::Image>(
-      //    cam_topic, rclcpp::SensorDataQoS(), std::bind(&ROS2Visualizer::callback_monocular, this, std::placeholders::_1, i));
-      auto sub = _node->create_subscription<sensor_msgs::msg::Image>(
-          cam_topic, 10, [this, i](const sensor_msgs::msg::Image::SharedPtr msg0) { callback_monocular(msg0, i); });
-      subs_cam.push_back(sub);
-      PRINT_INFO("subscribing to cam (mono): %s\n", cam_topic.c_str());
+      CameraTopicType topic_type = detect_camera_topic_type(_node, cam_topic);
+      if (topic_type == CameraTopicType::CompressedImage) {
+        auto sub = _node->create_subscription<sensor_msgs::msg::CompressedImage>(
+            cam_topic, 10, [this, i](const sensor_msgs::msg::CompressedImage::SharedPtr msg0) { callback_monocular(msg0, i); });
+        subs_cam_compressed.push_back(sub);
+        PRINT_INFO("subscribing to cam (mono compressed): %s\n", cam_topic.c_str());
+      } else {
+        // auto sub = _node->create_subscription<sensor_msgs::msg::Image>(
+        //    cam_topic, rclcpp::SensorDataQoS(), std::bind(&ROS2Visualizer::callback_monocular, this, std::placeholders::_1, i));
+        auto sub = _node->create_subscription<sensor_msgs::msg::Image>(
+            cam_topic, 10, [this, i](const sensor_msgs::msg::Image::SharedPtr msg0) { callback_monocular(msg0, i); });
+        subs_cam.push_back(sub);
+        PRINT_INFO("subscribing to cam (mono): %s\n", cam_topic.c_str());
+      }
     }
   }
 }
@@ -534,6 +642,40 @@ void ROS2Visualizer::callback_monocular(const sensor_msgs::msg::Image::SharedPtr
   std::sort(camera_queue.begin(), camera_queue.end());
 }
 
+void ROS2Visualizer::callback_monocular(const sensor_msgs::msg::CompressedImage::SharedPtr msg0, int cam_id0) {
+
+  // Check if we should drop this image
+  double timestamp = msg0->header.stamp.sec + msg0->header.stamp.nanosec * 1e-9;
+  double time_delta = 1.0 / _app->get_params().track_frequency;
+  if (camera_last_timestamp.find(cam_id0) != camera_last_timestamp.end() && timestamp < camera_last_timestamp.at(cam_id0) + time_delta) {
+    return;
+  }
+  camera_last_timestamp[cam_id0] = timestamp;
+
+  cv::Mat mono_image;
+  if (!compressed_to_mono8(*msg0, mono_image)) {
+    return;
+  }
+
+  // Create the measurement
+  ov_core::CameraData message;
+  message.timestamp = timestamp;
+  message.sensor_ids.push_back(cam_id0);
+  message.images.push_back(mono_image.clone());
+
+  // Load the mask if we are using it, else it is empty
+  if (_app->get_params().use_mask) {
+    message.masks.push_back(_app->get_params().masks.at(cam_id0));
+  } else {
+    message.masks.push_back(cv::Mat::zeros(mono_image.rows, mono_image.cols, CV_8UC1));
+  }
+
+  // append it to our queue of images
+  std::lock_guard<std::mutex> lck(camera_queue_mtx);
+  camera_queue.push_back(message);
+  std::sort(camera_queue.begin(), camera_queue.end());
+}
+
 void ROS2Visualizer::callback_stereo(const sensor_msgs::msg::Image::ConstSharedPtr msg0, const sensor_msgs::msg::Image::ConstSharedPtr msg1,
                                      int cam_id0, int cam_id1) {
 
@@ -580,6 +722,50 @@ void ROS2Visualizer::callback_stereo(const sensor_msgs::msg::Image::ConstSharedP
     // message.masks.push_back(cv::Mat(cv_ptr0->image.rows, cv_ptr0->image.cols, CV_8UC1, cv::Scalar(255)));
     message.masks.push_back(cv::Mat::zeros(cv_ptr0->image.rows, cv_ptr0->image.cols, CV_8UC1));
     message.masks.push_back(cv::Mat::zeros(cv_ptr1->image.rows, cv_ptr1->image.cols, CV_8UC1));
+  }
+
+  // append it to our queue of images
+  std::lock_guard<std::mutex> lck(camera_queue_mtx);
+  camera_queue.push_back(message);
+  std::sort(camera_queue.begin(), camera_queue.end());
+}
+
+void ROS2Visualizer::callback_stereo(const sensor_msgs::msg::CompressedImage::ConstSharedPtr msg0,
+                                     const sensor_msgs::msg::CompressedImage::ConstSharedPtr msg1, int cam_id0, int cam_id1) {
+
+  // Check if we should drop this image
+  double timestamp = msg0->header.stamp.sec + msg0->header.stamp.nanosec * 1e-9;
+  double time_delta = 1.0 / _app->get_params().track_frequency;
+  if (camera_last_timestamp.find(cam_id0) != camera_last_timestamp.end() && timestamp < camera_last_timestamp.at(cam_id0) + time_delta) {
+    return;
+  }
+  camera_last_timestamp[cam_id0] = timestamp;
+
+  cv::Mat mono0;
+  if (!compressed_to_mono8(*msg0, mono0)) {
+    return;
+  }
+
+  cv::Mat mono1;
+  if (!compressed_to_mono8(*msg1, mono1)) {
+    return;
+  }
+
+  // Create the measurement
+  ov_core::CameraData message;
+  message.timestamp = timestamp;
+  message.sensor_ids.push_back(cam_id0);
+  message.sensor_ids.push_back(cam_id1);
+  message.images.push_back(mono0.clone());
+  message.images.push_back(mono1.clone());
+
+  // Load the mask if we are using it, else it is empty
+  if (_app->get_params().use_mask) {
+    message.masks.push_back(_app->get_params().masks.at(cam_id0));
+    message.masks.push_back(_app->get_params().masks.at(cam_id1));
+  } else {
+    message.masks.push_back(cv::Mat::zeros(mono0.rows, mono0.cols, CV_8UC1));
+    message.masks.push_back(cv::Mat::zeros(mono1.rows, mono1.cols, CV_8UC1));
   }
 
   // append it to our queue of images

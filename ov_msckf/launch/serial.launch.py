@@ -60,13 +60,13 @@ launch_args = [
     ),
     DeclareLaunchArgument(
         name="bag_storage_id",
-        default_value="sqlite3",
-        description="rosbag2 storage backend",
+        default_value="",
+        description="rosbag2 storage backend (optional, autodetected from metadata when omitted)",
     ),
     DeclareLaunchArgument(
         name="bag_serialization_format",
-        default_value="cdr",
-        description="rosbag2 serialization format",
+        default_value="",
+        description="rosbag2 serialization format (optional, autodetected from metadata when omitted)",
     ),
     DeclareLaunchArgument(
         name="dosave",
